@@ -30,7 +30,7 @@ login = (retsSession) ->
       gotData = true
       keyVals = text.split('\r\n')
       for keyVal in keyVals
-        split = keyVal.split('=')
+        split = keyVal.split(/\s{0,}=\s{0,}/)
         if split.length > 1
           systemData[split[0]] = split[1]
 
