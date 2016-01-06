@@ -37,8 +37,11 @@ normalizeOptions = (queryOptions) ->
     throw new Error('class is required (ex: RESI)')
   if !queryOptions.query
     throw new Error('query is required (ex: (MatrixModifiedDT=2014-01-01T00:00:00.000+) )')
-  mergeOptions(queryOptions, _queryOptionsDefaults)
-
+  merged = mergeOptions(queryOptions, _queryOptionsDefaults)
+  transformed = {}
+  for own key of merged
+    transformed[key[0].toUpperCase() + key.substring(1)] = merged[key]
+  transformed
 
 module.exports =
   mergeOptions: mergeOptions
