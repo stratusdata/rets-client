@@ -7,6 +7,7 @@ through2 = require('through2')
 queryOptionHelpers = require('../utils/queryOptions')
 retsHttp = require('../utils/retsHttp')
 retsParsing = require('../utils/retsParsing')
+errors = require('../utils/errors')
 
 
 ###
@@ -27,16 +28,14 @@ retsParsing = require('../utils/retsParsing')
 #
 ###
 
-searchRets = (queryOptions, headerInfoCallback) -> Promise.try () =>
-  finalQueryOptions = queryOptionHelpers.normalizeOptions(queryOptions)
-  resultStream = through2()
-  onError = (err) ->
-    httpStream.unpipe(resultStream)
-    resultStream.emit('error', err)
-  if !headerInfoCallback
-    headerInfoCallback = () ->  # noop
-  httpStream = retsHttp.streamRetsMethod 'search', @retsSession, finalQueryOptions, onError, headerInfoCallback
-  httpStream.pipe(resultStream)
+searchRets = (_options, responseHandler) -> Promise.try () =>
+  queryOptions = queryOptionHelpers.normalizeOptions(_options)
+  retsHttp.streamRetsMethod({retsMethod: 'search', queryOptions, responseHandler, parser: through2()}, @retsSession, @client)
+  .then (retsContext) ->
+    return {
+      headerInfo: retsContext.headerInfo
+      rawStream: retsContext.parser
+    }
 
 
 ###
@@ -62,28 +61,32 @@ searchRets = (queryOptions, headerInfoCallback) -> Promise.try () =>
 #       Please note that queryType and format are immutable.
 ###
 
-query = (resourceType, classType, queryString, options={}, rawData=false) ->
+query = (resourceType, classType, queryString, _options={}, rawData=false, parserEncoding='UTF-8') ->
   baseOpts =
     searchType: resourceType
     class: classType
     query: queryString
-  queryOptions = queryOptionHelpers.mergeOptions(baseOpts, options)
+  mainOptions = queryOptionHelpers.mergeOptions(baseOpts, _options)
 
   # make sure queryType and format will use the searchRets defaults
-  delete queryOptions.queryType
-  delete queryOptions.format
-  finalQueryOptions = queryOptionHelpers.normalizeOptions(queryOptions)
+  delete mainOptions.queryType
+  if mainOptions.format != 'COMPACT-DECODED' && mainOptions.format != 'COMPACT'
+    delete mainOptions.format
+  queryOptions = queryOptionHelpers.normalizeOptions(mainOptions)
 
-  context = retsParsing.getStreamParser(null, rawData)
-  retsHttp.streamRetsMethod('search', @retsSession, finalQueryOptions, context.fail, context.response)
-  .pipe(context.parser)
-  
-  context.retsStream
+  retsContext = retsParsing.getStreamParser({retsMethod: 'search', queryOptions}, null, rawData, parserEncoding)
+  retsHttp.streamRetsMethod(retsContext, @retsSession, @client)
+
+  return {
+    headerInfo: retsContext.headerInfo
+    retsStream: retsContext.retsStream
+  }
 
 
-module.exports = (_retsSession) ->
+module.exports = (_retsSession, _client) ->
   if !_retsSession
-    throw new Error('System data not set; invoke login().')
+    throw new errors.RetsParamError('System data not set; invoke login().')
   retsSession: _retsSession
+  client: _client
   query: query
   searchRets: searchRets

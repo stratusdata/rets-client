@@ -12,40 +12,52 @@ retsParsing = require('../utils/retsParsing')
 queryOptionHelpers = require('../utils/queryOptions')
 multipart = require('../utils/multipart')
 headersHelper = require('../utils/headers')
+errors = require('../utils/errors')
 
 
 _insensitiveStartsWith = (str, prefix) ->
   str.toLowerCase().lastIndexOf(prefix.toLowerCase(), 0) == 0
 
-_processBody = (headers, bodyStream, preDecoded) -> new Promise (resolve, reject) ->
-  headerInfo = headersHelper.processHeaders(headers)
-  if _insensitiveStartsWith(headerInfo.contentType, 'text/xml')
-    onError = (error) ->
-      reject {headerInfo, error}
-    retsParser = retsParsing.getSimpleParser(onError, headerInfo)
-    bodyStream.pipe(retsParser.parser)
-  else if _insensitiveStartsWith(headerInfo.contentType, 'multipart')
-    multipart.getObjectStream(headerInfo, bodyStream, _processBody)
+_processBody = (retsContext, preDecoded) -> new Promise (resolve, reject) ->
+  onError = (error) ->
+    reject(errors.ensureRetsError(retsContext, error))
+  if retsContext.headerInfo.location && retsContext.queryOptions.Location == 1
+    resolve
+      type: 'location'
+      headerInfo: retsContext.headerInfo
+  else if _insensitiveStartsWith(retsContext.headerInfo.contentType, 'text/xml')
+    retsParser = retsParsing.getSimpleParser(retsContext, onError)
+    retsContext.parser.pipe(retsParser.parser)
+  else if _insensitiveStartsWith(retsContext.headerInfo.contentType, 'multipart')
+    multipart.getObjectStream(retsContext, _processBody)
     .then (objectStream) ->
-      resolve {headerInfo, objectStream}
+      resolve {
+        type: 'objectStream'
+        headerInfo: retsContext.headerInfo
+        objectStream
+      }
     .catch (error) ->
-      reject {headerInfo, error}
+      onError(error)
   else
-    if preDecoded || headerInfo.transferEncoding in ['binary', '7bit', '8bit', undefined]
+    if preDecoded || retsContext.headerInfo.transferEncoding in ['binary', '7bit', '8bit', undefined]
       resolve
-        headerInfo: headerInfo
-        dataStream: bodyStream
-    else if headerInfo.transferEncoding == 'base64'
+        type: 'dataStream'
+        headerInfo: retsContext.headerInfo
+        dataStream: retsContext.parser
+    else if retsContext.headerInfo.transferEncoding == 'base64'
       b64 = base64.decode()
-      bodyStream.on 'error', (err) ->
-        b64.emit('error', err)
+      retsContext.parser.on 'error', (err) ->
+        b64.emit('error', errors.ensureRetsError(retsContext, err))
       resolve
-        headerInfo: headerInfo
-        dataStream: bodyStream.pipe(b64)
+        type: 'dataStream'
+        headerInfo: retsContext.headerInfo
+        dataStream: retsContext.parser.pipe(b64)
     else
       resolve
-        headerInfo: headerInfo
-        error: new Error("unknown transfer encoding: #{JSON.stringify(headerInfo.transferEncoding)}")
+        type: 'error'
+        headerInfo: retsContext.headerInfo
+        error: new errors.RetsProcessingError(retsContext, "unknown transfer encoding: #{JSON.stringify(retsContext.headerInfo.transferEncoding)}")
+        
 
 _annotateIds = (ids, suffix) ->
   if typeof(ids) == 'string'
@@ -106,11 +118,11 @@ _annotateIds = (ids, suffix) ->
 
 getObjects = (resourceType, objectType, ids, _options={}) -> Promise.try () =>
   if !resourceType
-    throw new Error('Resource type id is required')
+    throw new errors.RetsParamError('Resource type id is required')
   if !objectType
-    throw new Error('Object type id is required')
+    throw new errors.RetsParamError('Object type id is required')
   if !ids
-    throw new Error('Ids are required')
+    throw new errors.RetsParamError('Ids are required')
 
   idString = ''
   if typeof(ids) == 'string'
@@ -132,36 +144,34 @@ getObjects = (resourceType, objectType, ids, _options={}) -> Promise.try () =>
     Type: objectType
     Resource: resourceType
     ID: idString
-  options = queryOptionHelpers.mergeOptions(mainOptions, _options, {Location: 0})
+  queryOptions = queryOptionHelpers.mergeOptions(mainOptions, _options, {Location: 0})
   
-  if Array.isArray(options.ObjectData)
-    options.ObjectData = options.ObjectData.join(',')
+  if Array.isArray(queryOptions.ObjectData)
+    queryOptions.ObjectData = queryOptions.ObjectData.join(',')
   
-  alwaysGroupObjects = !!options.alwaysGroupObjects
-  delete options.alwaysGroupObjects
+  alwaysGroupObjects = !!queryOptions.alwaysGroupObjects
+  delete queryOptions.alwaysGroupObjects
 
   #pipe object data to stream buffer
   new Promise (resolve, reject) =>
-    done = false
-    fail = (error) ->
-      if done
-        return
-      done = true
-      reject(error)
-    req = retsHttp.streamRetsMethod('getObject', @retsSession, options, fail)
-    req.on('error', fail)
-    req.on 'response', (response) ->
-      if done
-        return
-      done = true
-      resolve(_processBody(response.rawHeaders, bodyStream, true))
-    bodyStream = req.pipe(through2())
+    errorHandler = (error) ->
+      return reject(errors.ensureRetsError(retsContext, error))
+    responseHandler = (response) ->
+      _processBody(retsContext, true)
+      .then (result) ->
+        resolve(result)
+      .catch (error) ->
+        errorHandler(error)
+    retsContext = {retsMethod: 'getObject', queryOptions, errorHandler, responseHandler, parser: through2()}
+    retsHttp.streamRetsMethod(retsContext, @retsSession, @client)
   .then (result) ->
     if result.objectStream || !alwaysGroupObjects
       return result
     wrappedResult =
+      type: 'objectStream'
       headerInfo: result.headerInfo
       objectStream: through2.obj()
+    wrappedResult.objectStream.write(type: 'headerInfo', headerInfo: result.headerInfo)
     wrappedResult.objectStream.write(result)
     wrappedResult.objectStream.end()
     wrappedResult
@@ -172,8 +182,8 @@ getObjects = (resourceType, objectType, ids, _options={}) -> Promise.try () =>
 #     agentIds) specified.  `ids` can be a single string or an array; a ':*' suffix is appended to each id.
 ###
 
-getAllObjects = (resourceType, objectType, ids, options) ->
-  @getObjects(resourceType, objectType, _annotateIds(ids, '*'), options)
+getAllObjects = (resourceType, objectType, ids, queryOptions) ->
+  @getObjects(resourceType, objectType, _annotateIds(ids, '*'), queryOptions)
 
 
 ###
@@ -181,14 +191,15 @@ getAllObjects = (resourceType, objectType, ids, options) ->
 #  or agentIds) specified.  `ids` can be a single string or an array; a ':0' suffix is appended to each id.  
 ###
 
-getPreferredObjects = (resourceType, objectType, ids, options) ->
-  @getObjects(resourceType, objectType, _annotateIds(ids, '0'), options)
+getPreferredObjects = (resourceType, objectType, ids, queryOptions) ->
+  @getObjects(resourceType, objectType, _annotateIds(ids, '0'), queryOptions)
 
 
-module.exports = (_retsSession) ->
+module.exports = (_retsSession, _client) ->
   if !_retsSession
-    throw new Error('System data not set; invoke login().')
+    throw new errors.RetsParamError('System data not set; invoke login().')
   retsSession: _retsSession
+  client: _client
   getObjects: getObjects
   getAllObjects: getAllObjects
   getPreferredObjects: getPreferredObjects

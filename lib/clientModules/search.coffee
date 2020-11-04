@@ -11,6 +11,7 @@ hex2a = require('../utils/hex2a')
 replyCodes = require('../utils/replyCodes')
 retsParsing = require('../utils/retsParsing')
 retsHttp = require('../utils/retsHttp')
+errors = require('../utils/errors')
 
 
 ###
@@ -29,11 +30,14 @@ retsHttp = require('../utils/retsHttp')
 #       limit:"NONE"
 ###
 
-searchRets = (queryOptions) -> Promise.try () =>
-  finalQueryOptions = queryOptionHelpers.normalizeOptions(queryOptions)
-  retsHttp.callRetsMethod('search', @retsSession, finalQueryOptions)
-  .then (result) ->
-    result.body
+searchRets = (_queryOptions) -> Promise.try () =>
+  queryOptions = queryOptionHelpers.normalizeOptions(_queryOptions)
+  retsHttp.callRetsMethod({retsMethod: 'search', queryOptions}, @retsSession, @client)
+  .then (retsContext) ->
+    return {
+      text: retsContext.body
+      headerInfo: retsContext.headerInfo
+    }
 
 
 ###
@@ -58,14 +62,14 @@ searchRets = (queryOptions) -> Promise.try () =>
 #       Please note that queryType and format are immutable.
 ###
 
-query = (resourceType, classType, queryString, options={}) -> new Promise (resolve, reject) =>
+query = (resourceType, classType, queryString, options={}, parserEncoding='UTF-8') -> new Promise (resolve, reject) =>
   result =
     results: []
     maxRowsExceeded: false
   currEntry = null
 
-  @stream.query(resourceType, classType, queryString, options)
-  .pipe through2.obj (event, encoding, callback) ->
+  retsContext = @stream.query(resourceType, classType, queryString, options, null, parserEncoding)
+  retsContext.retsStream.pipe through2.obj (event, encoding, callback) ->
     switch event.type
       when 'data'
         result.results.push(event.payload)
@@ -77,16 +81,18 @@ query = (resourceType, classType, queryString, options={}) -> new Promise (resol
       when 'done'
         for own key, value of event.payload
           result[key] = value
+        result.headerInfo = retsContext.headerInfo
         resolve(result)
       when 'error'
         reject(event.payload)
     callback()
 
 
-module.exports = (_retsSession) ->
+module.exports = (_retsSession, _client) ->
   if !_retsSession
-    throw new Error('System data not set; invoke login().')
+    throw new errors.RetsParamError('System data not set; invoke login().')
   retsSession: Promise.promisify(_retsSession)
+  client: _client
   searchRets: searchRets
   query: query
-  stream: require('./search.stream')(_retsSession)
+  stream: require('./search.stream')(_retsSession, _client)
