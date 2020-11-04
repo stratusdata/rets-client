@@ -5,60 +5,35 @@ A RETS (Real Estate Transaction Standard) client for Node.js.
 
 ## Changes
 
-#### 4.0.0
+#### 5.2
+Added `timeout` setting, and allow `COMPACT` format.
 
-Version 4.0!  This represents a substantial rewrite of the object-retrieval code, making it more robust and flexible,
-adding support for streaming object results, and allowing for additional query options (like `Location` and
-`ObjectData`).  See the simple photo query example at the end of the [Example RETS Session](#example-rets-session), and
-the [photo streaming example](#photo-streaming-example).
+#### 5.1
+Added TypeScript typings.
 
-Also new in version 4.0, just about every API call now gives access to header info from the RETS response.  For some
-queries, in particular object queries, headers are often used as a vehicle for important metadata about the response,
-so this is an important feature.  The exact mechanism varies depending on whether it a call that resolves to a stream
-(which now emits a `headerInfo` event) or a call that resolves to an object (which now has a `headerInfo` field).  Also,
-the RetsServerError and RetsReplyError objects now both contain a `headerInfo` field.
+#### 5.0
+A significant amount of internal cleanup, resulting in more consistent code and API.  There are some minor breaking
+changes, but they're small enough that migrating to 5.0 shouldn't be much effort.  The
+[Example Usage](https://github.com/sbruno81/rets-client#example-usage) has been updated to show 5.x patterns. 
 
-#### 3.3.0
+- object stream queries now have events with a `type` field to make discrimination easier, with the following
+possibilities:
+  - `dataStream`, for a stream containing an object's raw data
+  - `location`, when no stream is available but a URL is available in the `headerInfo` (as per the `Location: 1` option)
+  - `headerInfo`, with the headers for the outer multipart response
+  - `error`, for an error corresponding to a single object rather than the stream as a whole
+- search stream queries now return an object with a `retsStream` field rather than the bare stream
+- the `searchRets` method now returns an object with a `rawStream` field rather than the bare stream
+- headerInfo is now available on every query made
+  - login and logout set `client.loginHeaderInfo` and `client.logoutHeaderInfo`
+  - every streaming query will include an event with `type: 'headerInfo'`
+  - every buffered query (and most streaming queries) will return an object including a `headerInfo` field
+- errors now consistently include response headers as well as the request options
+- all calls made to the RETS server now obey `settings.method` for POST vs GET
 
-Version 3.3 adds support for debugging via the [debug](https://github.com/visionmedia/debug) and
-[request-debug](https://github.com/request/request-debug) modules. See the [debugging section](#debugging).
 
-#### 3.2.2
-
-Version 3.2.2 adds support for per-object errors when calling `client.objects.getPhotos()`.  The
-[Example RETS Session](#example-rets-session) illustrates proper error checking.
-
-#### 3.2.0
-
-Version 3.2 passes through any multipart headers (except for content-disposition, which gets split up first;
-content-type which is renamed to `mime`; and content-transfer-encoding which is used internally and not passed) onto
-the objects resolved from `client.objects.getPhotos()`. It also fixes a race condition in `client.objects.getPhotos()`.
-
-#### 3.1.0
-
-Version 3.1 adds a `response` field to the object resolved from `client.objects.getObject()`, containing the full HTTP
-response object.  It also fixes a major bug interfering with `client.objects.getPhotos()` and
-`client.objects.getObject()` calls.
-
-#### 3.0.0
-
-Version 3.x is out!  This represents a substantial rewrite of the underlying code, which should improve performance
-(both CPU and memory use) for almost all RETS calls by using node-expat instead of xml2js for xml parsing.  The changes
-are mostly internal, however there is 1 small backward-incompatible change needed for correctness, described below.
-The large internal refactor plus even a small breaking change warrants a major version bump.
-
-Version 3.x has almost the same interface as 2.x, which is completely different from 1.x.  If you wish to continue to
-use the 1.x version, you can use the [v1 branch](https://github.com/sbruno81/rets-client/tree/v1).
-
-Many of the metadata methods are capable of returning multiple sets of data, including (but not limited to) the
-getAll* methods.  Versions 1.x and 2.x did not handle this properly; ~~version 1.x returns the values from the last set
-encountered~~, and version 2.x returns the values from the first set encountered.  (This has been corrected in version
-1.2.0.)  Version 3.x always returns all values encountered, by returning an array of data sets rather than a single one.  
-
-In addition to the methods available in 2.x, version 3.0 adds `client.search.stream.searchRets()`, which returns a
-text stream of the raw XML result, and `client.search.stream.query()`, which returns a stream of low-level objects
-parsed from the XML.  (See the [streaming example](#simple-streaming-example) below.)  These streams, if used properly,
-should result in a much lower memory footprint than their corresponding non-streaming counterparts.
+#### 4.X and earlier
+See [the changelog](./CHANGELOG.md) for earlier changes.
 
 
 ## Implementation Notes
@@ -85,6 +60,7 @@ should match existing code style.
 
 #### TODO
 - create unit tests -- specifically ones that run off example RETS data rather than requiring access to a real RETS server
+- refactor streaming API to correctly respond to backpressure
 
 
 ## Example Usage
@@ -93,34 +69,37 @@ should match existing code style.
 ```javascript
     //create rets-client
     var clientSettings = {
-        loginUrl:retsLoginUrl,
-        username:retsUser,
-        password:retsPassword,
-        version:'RETS/1.7.2',
-        userAgent:'RETS node-client/3.0'
-    };
-...
-```    
-##### Client Configuration with UA Authorization
-```javascript
-    //create rets-client
-    var clientSettings = {
-        version:'RETS/1.7.2',
-        userAgent:userAgent,
-        userAgentPassword:userAgentPassword,
-        sessionId:sessionId
+        loginUrl: retsLoginUrl,
+        username: retsUser,
+        password: retsPassword,
+        version: 'RETS/1.7.2',
+        userAgent: 'RETS node-client/4.x',
+        method: 'GET'  // this is the default, or for some servers you may want 'POST'
     };
 ...
 ```
 
-#### Example RETS Session
+##### Client Configuration with UA Authorization
 ```javascript
-  var rets = require('rets-client');
-  var fs = require('fs');
-  var photoSourceId = '12345'; // <--- dummy example ID!  this will usually be a MLS number / listing id
-  var outputFields = function(obj, opts) {
+    //create rets-client
+    var clientSettings = {
+        version: 'RETS/1.7.2',
+        userAgent: userAgent,
+        userAgentPassword: userAgentPassword,
+        sessionId: sessionId
+    };
+...
+```
+
+##### Output helper used in many examples below
+
+```javascript
+function outputFields(obj, opts) {
+  if (!obj) {
+    console.log("      "+JSON.stringify(obj))
+  } else {
     if (!opts) opts = {};
-    
+
     var excludeFields;
     var loopFields;
     if (opts.exclude) {
@@ -133,193 +112,278 @@ should match existing code style.
       loopFields = Object.keys(obj);
       excludeFields = [];
     }
-    for (var i=0; i<loopFields.length; i++) {
-      if (excludeFields.indexOf(loopFields[i]) == -1) {
-      if (typeof(obj[field]) == 'object') {
-        console.log("    "+loopFields[i]+": "+JSON.stringify(obj[loopFields[i]]));
+    for (var i = 0; i < loopFields.length; i++) {
+      if (excludeFields.indexOf(loopFields[i]) != -1) {
+        continue;
+      }
+      if (typeof(obj[loopFields[i]]) == 'object') {
+        console.log("      " + loopFields[i] + ": " + JSON.stringify(obj[loopFields[i]], null, 2).replace(/\n/g, '\n      '));
       } else {
-        console.log("    "+loopFields[i]+": "+obj[loopFields[i]]);
+        console.log("      " + loopFields[i] + ": " + JSON.stringify(obj[loopFields[i]]));
       }
     }
-    console.log("");
-  };
+  }
+  console.log("");
+}
+```
+
+#### Example rets-client code
+```javascript
+var rets = require('rets-client');
+var fs = require('fs');
+var photoSourceId = '12345'; // <--- dummy example ID!  this will usually be a MLS number / listing id
   
-  // establish connection to RETS server which auto-logs out when we're done
-  rets.getAutoLogoutClient(clientSettings, function (client) {
-    console.log("===================================");
-    console.log("========  System Metadata  ========");
-    console.log("===================================");
-    outputFields(client.systemData);
-    
-    //get resources metadata
-    return client.metadata.getResources()
-      .then(function (data) {
-        console.log("======================================");
-        console.log("========  Resources Metadata  ========");
-        console.log("======================================");
-        outputFields(data.results[0].info);
-        for (var dataItem = 0; dataItem < data.results[0].metadata.length; dataItem++) {
-          console.log("-------- Resource " + dataItem + " --------");
-          outputFields(data.results[0].metadata[dataItem], {fields: ['ResourceID', 'StandardName', 'VisibleName', 'ObjectVersion']});
-        }
-      }).then(function () {
-      
-        //get class metadata
-        return client.metadata.getClass("Property");
-      }).then(function (data) {
-        console.log("===========================================================");
-        console.log("========  Class Metadata (from Property Resource)  ========");
-        console.log("===========================================================");
-        outputFields(data.results[0].info);
-        for (var classItem = 0; classItem < data.results[0].metadata.length; classItem++) {
-          console.log("-------- Table " + classItem + " --------");
-          outputFields(data.results[0].metadata[classItem], {fields: ['ClassName', 'StandardName', 'VisibleName', 'TableVersion']});
-        }
-      }).then(function () {
-      
-        //get field data for open houses
-        return client.metadata.getTable("OpenHouse", "OPENHOUSE");
-      }).then(function (data) {
-        console.log("=============================================");
-        console.log("========  OpenHouse Table Metadata  ========");
-        console.log("=============================================");
-        outputFields(data.results[0].info);
-        for (var tableItem = 0; tableItem < data.results[0].metadata.length; tableItem++) {
-          console.log("-------- Field " + tableItem + " --------");
-          outputFields(data.results[0].metadata[tableItem], {fields: ['MetadataEntryID', 'SystemName', 'ShortName', 'LongName', 'DataType']});
-        }
-        return data.results[0].metadata
-      }).then(function (fieldsData) {
-        var plucked = [];
-        for (var fieldItem = 0; fieldItem < fieldsData.length; fieldItem++) {
-          plucked.push(fieldsData[fieldItem].SystemName);
-        }
-        return plucked;
-      }).then(function (fields) {
-      
-        //perform a query using DQML2 -- pass resource, class, and query, and options
-        return client.search.query("OpenHouse", "OPENHOUSE", "(OpenHouseType=PUBLIC),(ActiveYN=1)", {limit:100, offset:10})
+// establish connection to RETS server which auto-logs out when we're done
+rets.getAutoLogoutClient(clientSettings, function (client) {
+  console.log("===================================");
+  console.log("========  System Metadata  ========");
+  console.log("===================================");
+  console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+  outputFields(client.loginHeaderInfo);
+  console.log('   ~~~~~~~~~ System Data ~~~~~~~~~');
+  outputFields(client.systemData);
+
+  //get resources metadata
+  return client.metadata.getResources()
+    .then(function (data) {
+      console.log("======================================");
+      console.log("========  Resources Metadata  ========");
+      console.log("======================================");
+      console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+      outputFields(data.headerInfo);
+      console.log('   ~~~~~~ Resources Metadata ~~~~~');
+      outputFields(data.results[0].info);
+      for (var dataItem = 0; dataItem < data.results[0].metadata.length; dataItem++) {
+        console.log("   -------- Resource " + dataItem + " --------");
+        outputFields(data.results[0].metadata[dataItem], {fields: ['ResourceID', 'StandardName', 'VisibleName', 'ObjectVersion']});
+      }
+    }).then(function () {
+
+      //get class metadata
+      return client.metadata.getClass("Property");
+    }).then(function (data) {
+      console.log("===========================================================");
+      console.log("========  Class Metadata (from Property Resource)  ========");
+      console.log("===========================================================");
+      console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+      outputFields(data.headerInfo);
+      console.log('   ~~~~~~~~ Class Metadata ~~~~~~~');
+      outputFields(data.results[0].info);
+      for (var classItem = 0; classItem < data.results[0].metadata.length; classItem++) {
+        console.log("   -------- Table " + classItem + " --------");
+        outputFields(data.results[0].metadata[classItem], {fields: ['ClassName', 'StandardName', 'VisibleName', 'TableVersion']});
+      }
+    }).then(function () {
+
+      //get field data for open houses
+      return client.metadata.getTable("Property", "RESIDENTIAL");
+    }).then(function (data) {
+      console.log("==============================================");
+      console.log("========  Residential Table Metadata  ========");
+      console.log("===============================================");
+      console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+      outputFields(data.headerInfo);
+      console.log('   ~~~~~~~~ Table Metadata ~~~~~~~');
+      outputFields(data.results[0].info);
+      for (var tableItem = 0; tableItem < data.results[0].metadata.length; tableItem++) {
+        console.log("   -------- Field " + tableItem + " --------");
+        outputFields(data.results[0].metadata[tableItem], {fields: ['MetadataEntryID', 'SystemName', 'ShortName', 'LongName', 'DataType']});
+      }
+      return data.results[0].metadata
+    }).then(function (fieldsData) {
+      var plucked = [];
+      for (var fieldItem = 0; fieldItem < fieldsData.length; fieldItem++) {
+        plucked.push(fieldsData[fieldItem].SystemName);
+      }
+      return plucked;
+    }).then(function (fields) {
+
+      //perform a query using DMQL2 -- pass resource, class, and query, and options
+      return client.search.query("Property", "RESIDENTIAL", "(RecordModDate=2016-06-20+),(ActiveYN=1)", {limit:100, offset:10})
         .then(function (searchData) {
-          console.log("===========================================");
-          console.log("========  OpenHouse Query Results  ========");
-          console.log("===========================================");
-          outputFields(searchData, {exclude: ['results']});
+          console.log("=============================================");
+          console.log("========  Residential Query Results  ========");
+          console.log("=============================================");
+          console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+          outputFields(searchData.headerInfo);
+          console.log('   ~~~~~~~~~~ Query Info ~~~~~~~~~');
+          outputFields(searchData, {exclude: ['results','headerInfo']});
           //iterate through search results
           for (var dataItem = 0; dataItem < searchData.results.length; dataItem++) {
-            console.log("-------- Result " + dataItem + " --------");
+            console.log("   -------- Result " + dataItem + " --------");
             outputFields(searchData.results[dataItem], {fields: fields});
           }
           if (searchData.maxRowsExceeded) {
-            console.log("-------- More rows available!");
+            console.log("   -------- More rows available!");
           }
         });
-      }).then(function () {
-      
-        // get photos
-        return client.objects.getAllObjects("Property", "LargePhoto", photoSourceId, {alwaysGroupObjects: true, ObjectData: '*'})
-      }).then(function (photoResults) {
-        console.log("=================================");
-        console.log("========  Photo Results  ========");
-        console.log("=================================");
-        for (var i = 0; i < photoResults.objects.length; i++) {
-          if (photoResults.objects[i].error) {
-            console.log("Photo " + (i + 1) + " had an error: " + photoResults.objects[i].error);
-          } else {
-            console.log("Photo " + (i + 1) + ":");
-            outputFields(photoResults.objects[i].headerInfo);
-            fs.writeFileSync(
-              "/tmp/photo" + (i + 1) + "." + photoResults.objects[i].headerInfo.contentType.match(/\w+\/(\w+)/i)[1],
-              photoResults.objects[i].data
-            );
-          }
-          console.log("---------------------------------");
+    }).then(function () {
+
+      // get photos
+      return client.objects.getAllObjects("Property", "LargePhoto", photoSourceId, {alwaysGroupObjects: true, ObjectData: '*'})
+    }).then(function (photoResults) {
+      console.log("=================================");
+      console.log("========  Photo Results  ========");
+      console.log("=================================");
+      console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+      outputFields(photoResults.headerInfo);
+      for (var i = 0; i < photoResults.objects.length; i++) {
+        console.log("   -------- Photo " + (i + 1) + " --------");
+        if (photoResults.objects[i].error) {
+          console.log("      Error: " + photoResults.objects[i].error);
+        } else {
+          outputFields(photoResults.objects[i].headerInfo);
+          fs.writeFileSync(
+            "/tmp/photo" + (i + 1) + "." + photoResults.objects[i].headerInfo.contentType.match(/\w+\/(\w+)/i)[1],
+            photoResults.objects[i].data);
         }
-      });
-      
-  }).catch(function (errorInfo) {
-    var error = errorInfo.error || errorInfo;
-    console.log("ERROR: issue encountered: "+(error.stack||error));
-  });
+      }
+    });
+
+}).catch(function (errorInfo) {
+  var error = errorInfo.error || errorInfo;
+  console.log("   ERROR: issue encountered:");
+  outputFields(error);
+  console.log('   '+(error.stack||error).replace(/\n/g, '\n   '));
+});
 ```
 
 #### Simple streaming example
 ```javascript
-  var rets = require('rets-client');
-  var through2 = require('through2');
-  var Promise = require('bluebird');
-  // establish connection to RETS server which auto-logs out when we're done
-  rets.getAutoLogoutClient(clientSettings, function (client) {
-    // in order to have the auto-logout function work properly, we need to make a promise that either rejects or
-    // resolves only once we're done processing the stream
-    return new Promise(function (reject, resolve) {
-      var retsStream = client.search.stream.query("OpenHouse", "OPENHOUSE", "(OpenHouseType=PUBLIC),(ActiveYN=1)", {limit:100, offset:10});
-      var processorStream = through2.obj(function (event, encoding, callback) {
-        switch (event.type) {
-          case 'data':
-            // event.payload is an object representing a single row of results
-            // make sure callback is called only when all processing is complete
-            doAsyncProcessing(event.payload, callback);
-            break;
-          case 'done':
-            // event.payload is an object containing a count of rows actually received, plus some other things
-            // now we can resolve the auto-logout promise
-            resolve(event.payload.rowsReceived);
-            callback();
-            break;
-          case 'error':
-            // event.payload is an Error object
-            console.log('Error streaming RETS results: '+event.payload);
-            retsStream.unpipe(processorStream);
-            processorStream.end();
-            // we need to reject the auto-logout promise
-            reject(event.payload);
-            callback();
-            break;
-          default:
-            // ignore other events
-            callback();
-        }
-      });
-      retsStream.pipe(processorStream);
+var rets = require('rets-client');
+var through2 = require('through2');
+var Promise = require('bluebird');
+  
+// this function doesn't do much, it's just a placeholder for whatever you want to do with the results 
+function doAsyncProcessing(row, index, callback) {
+  console.log("-------- Result " + index + " --------");
+  outputFields(row);
+  // must be sure callback is called when this is done
+  callback();
+}
+
+// establish connection to RETS server which auto-logs out when we're done
+rets.getAutoLogoutClient(clientSettings, function (client) {
+  // in order to have the auto-logout function work properly, we need to make a promise that either rejects or
+  // resolves only once we're done processing the stream
+  return new Promise(function (resolve, reject) {
+    console.log("====================================");
+    console.log("========  Streamed Results  ========");
+    console.log("====================================");
+    var count = 0;
+    var streamResult = client.search.stream.query("Property", "RES", "(LastChangeTimestamp=2016-06-20+)", {limit:10, offset:4});
+    var processorStream = through2.obj(function (event, encoding, callback) {
+      switch (event.type) {
+        case 'headerInfo':
+          console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+          outputFields(event.payload);
+          callback();
+          break;
+        case 'data':
+          // event.payload is an object representing a single row of results
+          // make sure callback is called only when all processing is complete
+          count++;
+          doAsyncProcessing(event.payload, count, callback);
+          break;
+        case 'done':
+          // event.payload is an object containing a count of rows actually received, plus some other things
+          // now we can resolve the auto-logout promise
+          resolve(event.payload.rowsReceived);
+          callback();
+          break;
+        case 'error':
+          // event.payload is an Error object
+          console.log('Error streaming RETS results: '+event.payload);
+          streamResult.retsStream.unpipe(processorStream);
+          processorStream.end();
+          // we need to reject the auto-logout promise
+          reject(event.payload);
+          callback();
+          break;
+        default:
+          // ignore other events
+          callback();
+      }
     });
+    streamResult.retsStream.pipe(processorStream);
   });
+
+}).catch(function (errorInfo) {
+  var error = errorInfo.error || errorInfo;
+  console.log("   ERROR: issue encountered:");
+  outputFields(error);
+  console.log('   '+(error.stack||error).replace(/\n/g, '\n   '));
+});
 ```
 
 #### Photo streaming example
 ```javascript
-  var rets = require('rets-client');
-  // establish connection to RETS server which auto-logs out when we're done
-  rets.getAutoLogoutClient(clientSettings, function (client) {
-    // getObjects will accept a single string, an array of strings, or an object as shown below
-    var photoIds = {
-      '11111': [1,3],  // get photos #1 and #3 for listingId 11111
-      '22222': '*',    // get all photos for listingId 22222
-      '33333': '0'     // get 'preferred' photo for listingId 33333
-    };
-    return client.objects.stream.getObjects('Property', 'Photo', photoIds, {alwaysGroupObjects: true, ObjectData: '*'})
+var rets = require('rets-client');
+var fs = require('fs');
+
+// establish connection to RETS server which auto-logs out when we're done
+rets.getAutoLogoutClient(clientSettings, function (client) {
+  // getObjects will accept a single string, an array of strings, or an object as shown below
+  var photoIds = {
+    '11111': [1,3],  // get photos #1 and #3 for listingId 11111
+    '22222': '*',    // get all photos for listingId 22222
+    '33333': '0'     // get 'preferred' photo for listingId 33333
+  };
+  return client.objects.stream.getObjects('Property', 'LargePhoto', photoIds, {alwaysGroupObjects: true, ObjectData: '*'})
     .then(function (photoStream) {
+      console.log("========================================");
+      console.log("========  Photo Stream Results  ========");
+      console.log("========================================");
       return new Promise(function (resolve, reject) {
         var i=0;
-        photoStream.on('data', function (photoEvent) {
-          i++;
-          if (photoEvent.error) {
-            console.log("Photo " + i + " had an error: " + photoEvent.error);
-          } else {
-            console.log("Photo " + (i + 1) + ":");
-            outputFields(photoResults.objects[i].headerInfo);
-            fileStream = fs.createWriteStream(
-              "/tmp/photo" + i + "." + photoEvent.headerInfo.contentType.match(/\w+\/(\w+)/i)[1]
-            );
-            photoEvent.dataStream.pipe(fileStream);
+        photoStream.objectStream.on('data', function (event) {
+          try {
+            if (event.type == 'headerInfo') {
+              console.log('   ~~~~~~~~~ Header Info ~~~~~~~~~');
+              outputFields(event.headerInfo);
+              return
+            }
+            console.log("   -------- Photo " + (i + 1) + " --------");
+            if (event.type == 'error') {
+              console.log("      Error: " + event.error);
+            } else if (event.type == 'dataStream') {
+              outputFields(event.headerInfo);
+              fileStream = fs.createWriteStream(
+                "/tmp/photo_" + event.headerInfo.contentId + "_" + event.headerInfo.objectId + "." + event.headerInfo.contentType.match(/\w+\/(\w+)/i)[1]);
+              event.dataStream.pipe(fileStream);
+            }
+            i++;
+          } catch (err) {
+            reject(err);
           }
         });
-        photoStream.on('end', function () {
+        photoStream.objectStream.on('error', function (errorInfo) {
+          reject(errorInfo);
+        });
+        photoStream.objectStream.on('end', function () {
           resolve();
         });
       });
+    }).catch(function (errorInfo) {
+      var error = errorInfo.error || errorInfo;
+      console.log("   ERROR: issue encountered:");
+      outputFields(error);
+      console.log('   '+(error.stack||error).replace(/\n/g, '\n   '));
     });
-  });
+});
 ```
+
+##### Errors
+There are 6 error classes exposed by this module:
+* `RetsError`: A parent class for all the errors below, to make it more convenient to catch errors from this library.
+I've made somewhat of an effort to catch any errors thrown by dependencies of this library and re-throw them as instances
+of RetsError, so that any error generated by a call to this library can be detected the same way; if you find an error
+coming through that didn't get this treatment, please open a ticket (or better, a PR!) to let me know.
+* `RetsParamError`: Used when a required function parameter is missing or has an invalid value
+* `RetsServerError`: Used when the HTTP response indicates an error, such as a "401 Unauthorized" response
+* `RetsReplyError`: Used when the HTTP response is valid, but the XML RETS response indicates an error
+* `RetsProcessingError`: Used when a problem is encountered processing the response from the RETS server
+* `RetsPermissionError`: Used when RETS login is successful, but the account does not have the full permissions expected
 
 ##### Debugging
 You can turn on all debug logging by adding `rets-client:*` to your `DEBUG` environment variable, as per the
@@ -327,10 +391,8 @@ You can turn on all debug logging by adding `rets-client:*` to your `DEBUG` envi
 * `rets-client:main`: basic logging of RETS call options and errors
 * `rets-client:request`: logging of HTTP request/response headers and other related info, with output almost identical
 to that provided by the [request-debug module](https://github.com/request/request-debug).
+* `rets-client:multipart`: logging of most multipart parser events
+* `rets-client:multipart:verbose`: logging of additional multipart parser events (too cluttered for most purposes)
 
 If you want access to the request debugging data directly, you can use the `requestDebugFunction` client setting.  This
 function will be set up as a debug handler as per the [request-debug module](https://github.com/request/request-debug).
-
-In order to get either `rets-client:request` logging, or to use `requestDebugFunction`, you will need to ensure
-dev dependencies (in particular, request-debug) are installed for rets-client.  The easiest way to do this is to first
-change directory to the location of rets-client (e.g. `cd ./node_modules/rets-client`), and then run `npm install`.

@@ -12,7 +12,7 @@ object = require('./clientModules/object')
 
 auth = require('./utils/auth')
 normalizeUrl = require('./utils/normalizeUrl')
-
+errors = require('./utils/errors')
 
 URL_KEYS =
   GET_METADATA: "GetMetadata"
@@ -31,18 +31,14 @@ class Client
       @settings[key] = val
     
     @headers =
-      'User-Agent': "Node-Rets/1.0"
+      'User-Agent': @settings.userAgent || 'RETS node-client/4.x',
       'RETS-Version': @settings.version || 'RETS/1.7.2'
 
-    if @settings.userAgent
-      # use specified user agent
-      @headers['User-Agent'] = @settings.userAgent
-
-      # add RETS-UA-Authorization header
-      if @settings.userAgentPassword
-        a1 = crypto.createHash('md5').update([@settings.userAgent, @settings.userAgentPassword].join(":")).digest('hex')
-        retsUaAuth = crypto.createHash('md5').update([a1, "", @settings.sessionId || "", @settings.version || headers['RETS-Version']].join(":")).digest('hex')
-        @headers['RETS-UA-Authorization'] = "Digest " + retsUaAuth
+    # add RETS-UA-Authorization header
+    if @settings.userAgentPassword
+      a1 = crypto.createHash('md5').update([@settings.userAgent, @settings.userAgentPassword].join(":")).digest('hex')
+      retsUaAuth = crypto.createHash('md5').update([a1, "", @settings.sessionId || "", @settings.version || @headers['RETS-Version']].join(":")).digest('hex')
+      @headers['RETS-UA-Authorization'] = "Digest " + retsUaAuth
 
     debugRequest = require('debug')('rets-client:request')
     if debugRequest.enabled
@@ -53,40 +49,70 @@ class Client
     defaults =
       jar: request.jar()
       headers: @headers
+      
+    if @settings.method
+      defaults.method = @settings.method
+    else
+      defaults.method = 'GET'
 
     if @settings.username && @settings.password
       defaults.auth =
         'user': @settings.username
         'pass': @settings.password
         'sendImmediately': false
+    
+    if @settings.timeout
+      defaults.timeout = @settings.timeout
 
     if @settings.proxyUrl
       defaults.proxy = @settings.proxyUrl
+      if @settings.useTunnel
+        defaults.tunnel = @settings.useTunnel
     
     @baseRetsSession = request.defaults defaults
+    @loginRequest = Promise.promisify(@baseRetsSession.defaults(uri: @settings.loginUrl))
 
 
   login: () ->
-    options =
-      uri: @settings.loginUrl
-    auth.login(@baseRetsSession.defaults(options))
-    .then (systemData) =>
-      @systemData = systemData
+    auth.login(@loginRequest, @)
+    .then (retsContext) =>
+      @systemData = retsContext.systemData
+      @loginHeaderInfo = retsContext.headerInfo
       @urls = {}
       for key,val of URL_KEYS
         if @systemData[val]
           @urls[val] = normalizeUrl(@systemData[val], @settings.loginUrl)
-
-      @metadata = metadata(@baseRetsSession.defaults(uri: @urls[URL_KEYS.GET_METADATA]))
-      @search = search(@baseRetsSession.defaults(uri: @urls[URL_KEYS.SEARCH]))
-      @objects = object(@baseRetsSession.defaults(uri: @urls[URL_KEYS.GET_OBJECT]))
-      @logoutRequest = @baseRetsSession.defaults uri: @urls[URL_KEYS.LOGOUT]
-
+          
+      hasPermissions = true
+      missingPermissions = []
+      if @urls[URL_KEYS.GET_METADATA]
+        @metadata = metadata(@baseRetsSession.defaults(uri: @urls[URL_KEYS.GET_METADATA]), @)
+      else
+        hasPermissions = false
+        missingPermissions.push URL_KEYS.GET_METADATA
+      if @urls[URL_KEYS.SEARCH]
+        @search = search(@baseRetsSession.defaults(uri: @urls[URL_KEYS.SEARCH]), @)
+      else
+        hasPermissions = false
+        missingPermissions.push URL_KEYS.SEARCH
+      if @urls[URL_KEYS.GET_OBJECT]
+        @objects = object(@baseRetsSession.defaults(uri: @urls[URL_KEYS.GET_OBJECT]), @)
+      @logoutRequest = Promise.promisify(@baseRetsSession.defaults(uri: @urls[URL_KEYS.LOGOUT]))
+      if !hasPermissions
+        throw new errors.RetsPermissionError(missingPermissions)
+        
+      if @settings.userAgentPassword && @settings.sessionId
+        a1 = crypto.createHash('md5').update([@settings.userAgent, @settings.userAgentPassword].join(":")).digest('hex')
+        retsUaAuth = crypto.createHash('md5').update([a1, "", @settings.sessionId || "", @settings.version || @headers['RETS-Version']].join(":")).digest('hex')
+        @headers['RETS-UA-Authorization'] = "Digest " + retsUaAuth
+        
       return @
 
   # Logs the user out of the current session
   logout: () ->
-    auth.logout(@logoutRequest)
+    auth.logout(@logoutRequest, @)
+    .then (retsContext) =>
+      @logoutHeaderInfo = retsContext.headerInfo
 
 
 Client.getAutoLogoutClient = (settings, handler) -> Promise.try () ->

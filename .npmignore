@@ -6,12 +6,12 @@
 
 #ignore node_modules
 node_modules
-package-lock.json
 
 #ignore integration test configs
 testconfig.json
 
 #ignore build directory
+dist
 
 # Ignore all logfiles and tempfiles.
 /log/*.log
@@ -48,3 +48,10 @@ atlassian-ide-plugin.xml
 com_crashlytics_export_strings.xml
 
 test/*.js
+
+
+# npmignore - content above this line is automatically generated and modifications may be omitted
+# see npmjs.com/npmignore for more details.
+test
+lib
+.vscode

@@ -8,19 +8,19 @@ through2 = require('through2')
 replyCodes = require('../utils/replyCodes')
 retsHttp = require('../utils/retsHttp')
 retsParsing = require('../utils/retsParsing')
+errors = require('../utils/errors')
 
 
-_getMetadataImpl = (retsSession, type, options) -> new Promise (resolve, reject) ->
-  context = retsParsing.getStreamParser(type)
-  retsHttp.streamRetsMethod('getMetadata', retsSession, options, context.fail, context.response)
-  .pipe(context.parser)
+_getMetadataImpl = (retsSession, type, queryOptions, client) -> new Promise (resolve, reject) ->
+  retsContext = retsParsing.getStreamParser({retsMethod: 'getMetadata', queryOptions}, type)
+  retsHttp.streamRetsMethod(retsContext, retsSession, client)
 
   result =
     results: []
     type: type
   currEntry = null
 
-  context.retsStream.pipe through2.obj (event, encoding, callback) ->
+  retsContext.retsStream.pipe through2.obj (event, encoding, callback) ->
     switch event.type
       when 'data'
         currEntry.metadata.push(event.payload)
@@ -55,14 +55,14 @@ _getMetadataImpl = (retsSession, type, options) -> new Promise (resolve, reject)
 
 getMetadata = (type, id, format='COMPACT') -> Promise.try () =>
   if !type
-    throw new Error('Metadata type is required')
+    throw new errors.RetsParamError('Metadata type is required')
   if !id
-    throw new Error('Resource type id is required (or for some types of metadata, "0" retrieves for all resource types)')
-  options =
+    throw new errors.RetsParamError('Resource type id is required (or for some types of metadata, "0" retrieves for all resource types)')
+  queryOptions =
     Type: type
     ID: id
     Format: format
-  retsHttp.callRetsMethod('getMetadata', @retsSession, options)
+  retsHttp.callRetsMethod({retsMethod: 'getMetadata', queryOptions}, @retsSession, @client)
 
 
 ###
@@ -70,13 +70,15 @@ getMetadata = (type, id, format='COMPACT') -> Promise.try () =>
 ###
 
 getSystem = () ->
-  @getMetadata('METADATA-SYSTEM')
-  .then (xmlResponse) -> new Promise (resolve, reject) ->
+  @getMetadata('METADATA-SYSTEM', '0')
+  .then (retsContext) -> new Promise (resolve, reject) ->
     result = {}
-    retsParser = retsParsing.getSimpleParser(reject, xmlResponse.headerInfo)
+    retsParser = retsParsing.getSimpleParser(retsContext, reject)
 
     gotMetaDataInfo = false
     gotSystemInfo = false
+    comment = null
+    comments = []
     retsParser.parser.on 'startElement', (name, attrs) ->
       switch name
         when 'METADATA-SYSTEM'
@@ -87,34 +89,48 @@ getSystem = () ->
           gotSystemInfo = true
           result.systemId = attrs.SystemID
           result.systemDescription = attrs.SystemDescription
+          result.timeZoneOffset = attrs.TimeZoneOffset
+        when 'COMMENTS'
+          comment = ''
+          
+    retsParser.parser.on 'text', (text) ->
+      if retsParser.currElementName == 'COMMENTS'
+        comment += text
 
     retsParser.parser.on 'endElement', (name) ->
+      if name == 'COMMENTS'
+        comment = comment.trim()
+        if comment.length > 0
+          comments.push(comment)
       if name != 'RETS'
         return
       retsParser.finish()
       if !gotSystemInfo || !gotMetaDataInfo
-        reject(new Error('Failed to parse data'))
+        reject(new errors.RetsProcessingError(retsContext, 'Failed to parse data'))
       else
+        if comments.length > 0
+          result.comments = comments
+        result.headerInfo = retsContext.headerInfo
         resolve(result)
     
-    retsParser.parser.write(xmlResponse.body)
+    retsParser.parser.write(retsContext.body)
     retsParser.parser.end()
 
 
-module.exports = (_retsSession) ->
+module.exports = (_retsSession, _client) ->
   if !_retsSession
-    throw new Error('System data not set; invoke login().')
+    throw new errors.RetsParamError('System data not set; invoke login().')
   
 
   _getParsedMetadataFactory = (type, format='COMPACT') ->
     (id, classType) -> Promise.try () ->
       if !id
-        throw new Error('Resource type id is required (or for some types of metadata, "0" retrieves for all resource types)')
+        throw new errors.RetsParamError('Resource type id is required (or for some types of metadata, "0" retrieves for all resource types)')
       options =
         Type: type
         ID: if classType then "#{id}:#{classType}" else id
         Format: format
-      _getMetadataImpl(_retsSession, type, options)
+      _getMetadataImpl(_retsSession, type, options, _client)
   
   
   _getParsedAllMetadataFactory = (type, format='COMPACT') ->
@@ -122,10 +138,11 @@ module.exports = (_retsSession) ->
       Type: type
       ID: '0'
       Format: format
-    () -> _getMetadataImpl(_retsSession, type, options)
+    () -> _getMetadataImpl(_retsSession, type, options, _client)
   
   
   retsSession: Promise.promisify(_retsSession)
+  client: _client
   getMetadata: getMetadata
   getSystem: getSystem
   getResources:       _getParsedMetadataFactory('METADATA-RESOURCE').bind(null, '0')

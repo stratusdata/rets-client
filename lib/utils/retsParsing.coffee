@@ -18,10 +18,10 @@ headersHelper = require('./headers')
 
 
 # a parser with some basic common functionality, intended to be extended for real use
-getSimpleParser = (errCallback, headerInfo) ->
+getSimpleParser = (retsContext, errCallback, parserEncoding='UTF-8') ->
   result =
     currElementName: null
-    parser: new expat.Parser('UTF-8')
+    parser: new expat.Parser(parserEncoding)
     finish: () ->
       result.parser.removeAllListeners()
     status: null
@@ -29,48 +29,50 @@ getSimpleParser = (errCallback, headerInfo) ->
   result.parser.once 'startElement', (name, attrs) ->
     if name != 'RETS'
       result.finish()
-      errCallback(new Error('Unexpected results. Please check the RETS URL.'))
+      errCallback(new errors.RetsProcessingError(retsContext, 'Unexpected results. Please check the RETS URL.'))
 
   result.parser.on 'startElement', (name, attrs) ->
     result.currElementName = name
     if name != 'RETS' && name != 'RETS-STATUS'
       return
-    result.status = attrs
+    result.status =
+      replyCode: attrs.ReplyCode
+      replyTag: replyCodes.tagMap[attrs.ReplyCode]
+      replyText: attrs.ReplyText
     if attrs.ReplyCode != '0' && attrs.ReplyCode != '20208'
       result.finish()
-      errCallback(new errors.RetsReplyError(attrs.ReplyCode, attrs.ReplyText, headerInfo))
+      errCallback(new errors.RetsReplyError(retsContext, attrs.ReplyCode, attrs.ReplyText))
 
   result.parser.on 'error', (err) ->
     result.finish()
-    errCallback(new Error("XML parsing error: #{err}"))
+    errCallback(new errors.RetsProcessingError(retsContext, "XML parsing error: #{errors.getErrorMessage(err)}"))
 
   result.parser.on 'end', () ->
     result.finish()
-    errCallback(new Error("Unexpected end of xml stream."))
+    errCallback(new errors.RetsProcessingError(retsContext, "Unexpected end of xml stream."))
 
   result
 
 
 # parser that deals with column/data tags, as returned for metadata and search queries
-getStreamParser = (metadataTag, rawData) ->
+getStreamParser = (retsContext, metadataTag, rawData, parserEncoding='UTF-8') ->
   if metadataTag
     rawData = false
     result =
       rowsReceived: 0
       entriesReceived: 0
-    delimiter = '\t'
   else
     result =
       rowsReceived: 0
       maxRowsExceeded: false
-    delimiter = null
+  delimiter = '\t'
   columnText = null
   dataText = null
   columns = null
   currElementName = null
   headers = null
 
-  parser = new expat.Parser('UTF-8')
+  parser = new expat.Parser(parserEncoding)
   retsStream = through2.obj()
   finish = (type, payload) ->
     parser.removeAllListeners()
@@ -78,16 +80,15 @@ getStreamParser = (metadataTag, rawData) ->
     parser.on('error', () -> ### noop ###)
     retsStream.write(type: type, payload: payload)
     retsStream.end()
-  fail = (err) ->
+  errorHandler = (err) ->
     finish('error', err)
   writeOutput = (type, payload) ->
     retsStream.write(type: type, payload: payload)
-  response = (response) ->
-    headers = headersHelper.processHeaders(response.rawHeaders)
-    writeOutput('headerInfo', headers)
+  responseHandler = () ->
+    writeOutput('headerInfo', retsContext.headerInfo)
   processStatus = (attrs) ->
     if attrs.ReplyCode != '0' && attrs.ReplyCode != '20208'
-      return fail(new errors.RetsReplyError(attrs.ReplyCode, attrs.ReplyText, headers))
+      return errorHandler(new errors.RetsReplyError(retsContext, attrs.ReplyCode, attrs.ReplyText))
     status =
       replyCode: attrs.ReplyCode
       replyTag: replyCodes.tagMap[attrs.ReplyCode]
@@ -96,9 +97,11 @@ getStreamParser = (metadataTag, rawData) ->
 
   parser.once 'startElement', (name, attrs) ->
     if name != 'RETS'
-      return fail(new Error('Unexpected results. Please check the RETS URL.'))
+      return errorHandler(new errors.RetsProcessingError(retsContext, 'Unexpected results. Please check the RETS URL.'))
     processStatus(attrs)
-  
+    if !retsStream.writable
+      # assume processStatus found a non-zero/20208 error code and ended the stream  So, we don't want to add the startElement listener.
+      return
     parser.on 'startElement', (name, attrs) ->
       currElementName = name
       switch name
@@ -110,6 +113,9 @@ getStreamParser = (metadataTag, rawData) ->
           writeOutput('metadataStart', attrs)
           result.rowsReceived = 0
         when 'COUNT'
+          ### Ignore count write when stream ended due to NO_RECORDS_FOUND (20201) error. ###
+          if !retsStream.writable && parseInt(attrs.Records) == 0
+            return false
           writeOutput('count', parseInt(attrs.Records))
         when 'MAXROWS'
           result.maxRowsExceeded = true
@@ -143,7 +149,7 @@ getStreamParser = (metadataTag, rawData) ->
       switch name
         when 'DATA'
           if !columns
-            return fail(new Error('Failed to parse columns'))
+            return errorHandler(new errors.RetsProcessingError(retsContext, 'Failed to parse columns'))
           data = dataText.split(delimiter)
           model = {}
           i=1
@@ -154,7 +160,7 @@ getStreamParser = (metadataTag, rawData) ->
           result.rowsReceived++
         when 'COLUMNS'
           if !delimiter
-            return fail(new Error('Failed to parse delimiter'))
+            return errorHandler(new errors.RetsProcessingError(retsContext, 'Failed to parse delimiter'))
           columns = columnText.split(delimiter)
           writeOutput('columns', columns)
         when metadataTag
@@ -166,13 +172,17 @@ getStreamParser = (metadataTag, rawData) ->
           finish('done', result)
 
   parser.on 'error', (err) ->
-    fail(new Error("XML parsing error: #{err.stack}"))
+    errorHandler(new errors.RetsProcessingError(retsContext, "XML parsing error: #{errors.getErrorMessage(err)}"))
   
   parser.on 'end', () ->
     # we remove event listeners upon success, so getting here implies failure
-    fail(new Error("Unexpected end of xml stream."))
-  
-  { parser, fail, retsStream, response }
+    errorHandler(new errors.RetsProcessingError(retsContext, "Unexpected end of xml stream."))
+
+  retsContext.parser = parser
+  retsContext.errorHandler = errorHandler
+  retsContext.responseHandler = responseHandler
+  retsContext.retsStream = retsStream
+  retsContext
   
   
 module.exports =

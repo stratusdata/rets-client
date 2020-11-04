@@ -7,22 +7,31 @@ Promise = require('bluebird')
 retsParsing = require('./retsParsing')
 retsHttp = require('./retsHttp')
 headersHelper = require('./headers')
+errors = require('./errors')
 
 
 ###
 # Executes RETS login routine.
 ###
 
-login = (retsSession) ->
-  retsHttp.callRetsMethod('login', Promise.promisify(retsSession), {})
-  .then (retsResponse) -> new Promise (resolve, reject) ->
-    headers = headersHelper.processHeaders(retsResponse.response.rawHeaders)
-    systemData =
-      retsVersion: headers.retsVersion
-      retsServer: headers.server
-    
-    retsParser = retsParsing.getSimpleParser(reject, headers)
-    
+login = (retsSession, client) ->
+  retsHttp.callRetsMethod({retsMethod: 'login', queryOptions: {}}, retsSession, client)
+  .then (retsContext) -> new Promise (resolve, reject) ->
+    if client.settings.userAgentPassword && retsContext.headerInfo.setCookie
+      typeIsArray = Array.isArray || ( value ) -> return {}.toString.call( value ) is '[object Array]'
+      if typeIsArray retsContext.headerInfo.setCookie
+        headerCookies = retsContext.headerInfo.setCookie
+      else
+        headerCookies = [retsContext.headerInfo.setCookie];
+      for headerCookie in headerCookies
+        matches = headerCookie.match(/RETS\-Session\-ID=([^;]+);/)
+        if matches
+          client.settings.sessionId = matches[1]
+          break
+          
+    retsParser = retsParsing.getSimpleParser(retsContext, reject)
+
+    systemData = {}
     gotData = false
     retsParser.parser.on 'text', (text) ->
       if retsParser.currElementName != 'RETS-RESPONSE'
@@ -32,18 +41,18 @@ login = (retsSession) ->
       for keyVal in keyVals
         split = keyVal.split(/\s{0,}=\s{0,}/)
         if split.length > 1
-          systemData[split[0]] = split[1]
+          systemData[split[0].trim()] = split[1].trim()
 
     retsParser.parser.on 'endElement', (name) ->
       if name != 'RETS'
         return
       retsParser.finish()
       if !gotData
-        reject(new Error('Failed to parse data'))
+        reject(new errors.RetsProcessingError(retsContext, 'Failed to parse data'))
       else
-        resolve(systemData)
+        resolve({systemData, headerInfo: retsContext.headerInfo})
 
-    retsParser.parser.write(retsResponse.body)
+    retsParser.parser.write(retsContext.body)
     retsParser.parser.end()
 
 
@@ -51,9 +60,10 @@ login = (retsSession) ->
 # Logouts RETS user
 ###
 
-logout = (retsSession) ->
-  retsHttp.callRetsMethod('logout', Promise.promisify(retsSession), {})
-
+logout = (retsSession, client) ->
+  retsHttp.callRetsMethod({retsMethod: 'logout', queryOptions: {}}, retsSession, client)
+  .then (retsContext) ->
+    return {headerInfo: retsContext.headerInfo}
 
 module.exports =
   login: login
